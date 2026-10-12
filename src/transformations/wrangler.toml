@@ -1,0 +1,6 @@
+name = "transformations"
+main = "worker.ts"
+compatibility_date = "2026-10-12"
+
+# 路由：仅接管 /tr:w- 前缀路径（URL Rewrite 规则已排除该前缀，见 worker.ts 头部说明）
+routes = [{ pattern = "image.kanochan.net/tr:w-*", zone_name = "kanochan.net" }]

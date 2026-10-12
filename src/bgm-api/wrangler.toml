@@ -1,0 +1,10 @@
+name = "bgm-api"
+main = "worker.ts"
+compatibility_date = "2026-10-12"
+
+# CORS 白名单：逗号分隔，只允许这些来源跨域访问（覆盖 worker.js 中的默认值）
+[vars]
+CORS_ALLOWED_ORIGINS = "https://kanochan.net,https://kanochan.com"
+
+# 可选：绑定自定义域名，取消注释并改成你的域名
+routes = [{ pattern = "bgm-api.kanochan.net", custom_domain = true }]

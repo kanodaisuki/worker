@@ -2,9 +2,12 @@ name = "bgm-api"
 main = "worker.ts"
 compatibility_date = "2026-10-12"
 
-# CORS 白名单：逗号分隔，只允许这些来源跨域访问（覆盖 worker.js 中的默认值）
+# 绑定自定义域名（Custom Domain 由 Cloudflare 自动配置 DNS 与证书）。
+# 注意：routes 等顶层配置必须写在 [vars] 之前——TOML 中表头之后的键归入该表，
+# 写在 [vars] 之后会被解析成环境变量 vars.routes，而非路由配置。
+routes = [{ pattern = "bgm-api.kanochan.net", custom_domain = true }]
+
+# CORS 白名单：逗号分隔，只允许这些来源跨域访问（覆盖 worker.ts 中的默认值）
 [vars]
 CORS_ALLOWED_ORIGINS = "https://kanochan.net,https://kanochan.com"
 
-# 可选：绑定自定义域名，取消注释并改成你的域名
-routes = [{ pattern = "bgm-api.kanochan.net", custom_domain = true }]

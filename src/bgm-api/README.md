@@ -16,10 +16,14 @@ pnpm deploy:bgm-api     # 只部署 bgm-api（首次使用先 pnpm exec wrangler
 
 ### 绑定自定义域名
 
-编辑 [wrangler.toml](./wrangler.toml)，取消注释 `routes` 并改成你的域名（Custom Domain 由 Cloudflare 自动配置 DNS 与证书），随后重新部署：
+编辑 [wrangler.toml](./wrangler.toml) 中的 `routes` 并改成你的域名（Custom Domain 由 Cloudflare 自动配置 DNS 与证书），随后重新部署：
 
 ```toml
+# routes 等顶层配置必须写在 [vars] 之前，否则会被 TOML 解析成 [vars] 表里的环境变量
 routes = [{ pattern = "bgm-api.kanochan.net", custom_domain = true }]
+
+[vars]
+CORS_ALLOWED_ORIGINS = "https://kanochan.net,https://kanochan.com"
 ```
 
 ## 使用

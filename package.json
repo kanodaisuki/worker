@@ -1,0 +1,23 @@
+{
+  "name": "worker",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "vp test",
+    "check": "vp check",
+    "check:fix": "vp check --fix",
+    "lint": "vp lint",
+    "fmt": "vp fmt",
+    "typecheck": "vp check --no-fmt --no-lint",
+    "deploy": "pnpm run deploy:bgm-api && pnpm run deploy:transformations",
+    "deploy:bgm-api": "wrangler deploy --config src/bgm-api/wrangler.toml",
+    "deploy:transformations": "wrangler deploy --config src/transformations/wrangler.toml"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20261012.1",
+    "typescript": "^7.0.2",
+    "vite-plus": "^1.1.0",
+    "wrangler": "^4.149.0"
+  },
+  "packageManager": "pnpm@12.4.1"
+}

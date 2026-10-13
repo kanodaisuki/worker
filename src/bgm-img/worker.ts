@@ -18,6 +18,17 @@ const USER_AGENT = "bgm-img-proxy/1.0 (https://github.com/kanodaisuki/worker)";
 // 也可用 wrangler.toml 的 [vars].CORS_ALLOWED_ORIGINS 覆盖（逗号分隔，优先级更高）
 const DEFAULT_ALLOWED_ORIGINS = ["https://kanochan.net", "https://kanochan.com"];
 
+// 上游响应自带的 CORS 头：lain.bgm.tv 会下发 Access-Control-Allow-Origin: *，
+// 透传会绕过白名单（白名单外的来源也能读到响应），进缓存与出站前必须清除，再由 applyCors 按白名单重建
+const UPSTREAM_CORS_HEADERS = [
+  "access-control-allow-origin",
+  "access-control-allow-credentials",
+  "access-control-allow-headers",
+  "access-control-allow-methods",
+  "access-control-expose-headers",
+  "access-control-max-age",
+];
+
 // 封面图基本不变，缓存 30 天以最大化命中率
 const CACHE_TTL = 2592000;
 
@@ -87,6 +98,7 @@ async function proxy(request: Request, env: Env, ctx: ExecutionContext): Promise
   } else {
     const upstreamResponse = await fetch(upstreamUrl, { method: "GET", headers });
     response = new Response(body(upstreamResponse), upstreamResponse);
+    stripUpstreamCors(response.headers);
     response.headers.set("X-Cache", "MISS");
 
     // 只缓存 200；404/304 等透传不缓存，避免瞬时故障被长期固化
@@ -118,7 +130,14 @@ function corsHeaders(request: Request, env: Env): Record<string, string> {
   return headers;
 }
 
+function stripUpstreamCors(headers: Headers): void {
+  for (const name of UPSTREAM_CORS_HEADERS) headers.delete(name);
+}
+
 function applyCors(headers: Headers, request: Request, env: Env): void {
+  // 出站前先清除上游 CORS 头：历史缓存里可能残留 Access-Control-Allow-Origin: *（命中路径原样复制），
+  // 不清除会让白名单外的来源读到响应，白名单形同虚设
+  stripUpstreamCors(headers);
   const existingVary = headers.get("Vary");
   for (const [name, value] of Object.entries(corsHeaders(request, env))) {
     headers.set(name, value);

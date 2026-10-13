@@ -54,6 +54,85 @@ describe("CORS 白名单", () => {
     expect(res.headers.get("Access-Control-Allow-Origin")).toBeNull();
     expect(res.headers.get("Vary")).toBe("Origin");
   });
+
+  // 真实上游 lain.bgm.tv 会下发 Access-Control-Allow-Origin: *，必须被清除而非透传
+  function stubWildcardUpstream(cached?: Response): { stored: () => Response | undefined } {
+    let stored: Response | undefined;
+    vi.stubGlobal("fetch", () =>
+      Promise.resolve(
+        new Response("img", {
+          status: 200,
+          headers: {
+            "Content-Type": "image/jpeg",
+            "Access-Control-Allow-Origin": "*",
+          },
+        }),
+      ),
+    );
+    vi.stubGlobal("caches", {
+      default: {
+        match: async () => cached,
+        put: async (_key: Request, value: Response) => {
+          stored = value;
+        },
+      },
+    });
+    return { stored: () => stored };
+  }
+
+  function proxied(origin?: string): Request {
+    return new Request("https://proxy.test/r/200/pic/cover/l/5b/e2/2785_5IaII.jpg", {
+      headers: origin ? { Origin: origin } : {},
+    });
+  }
+
+  it("上游的 Allow-Origin: * 不透传，白名单外的来源读不到响应", async () => {
+    stubWildcardUpstream();
+
+    const res = await worker.fetch(proxied("https://evil.com"), env, ctx);
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get("Access-Control-Allow-Origin")).toBeNull();
+    expect(res.headers.get("Access-Control-Expose-Headers")).toBe("X-Cache, Cache-Control");
+  });
+
+  it("上游的 Allow-Origin: * 不透传，白名单内的来源回显自己的 Origin", async () => {
+    stubWildcardUpstream();
+
+    const res = await worker.fetch(proxied("https://kanochan.net"), env, ctx);
+
+    expect(res.headers.get("Access-Control-Allow-Origin")).toBe("https://kanochan.net");
+  });
+
+  it("上游的 Allow-Origin: * 不透传，无 Origin 的请求不返回 Allow-Origin", async () => {
+    stubWildcardUpstream();
+
+    const res = await worker.fetch(proxied(), env, ctx);
+
+    expect(res.headers.get("Access-Control-Allow-Origin")).toBeNull();
+  });
+
+  it("历史缓存里残留的上游 Allow-Origin: * 在命中时被清除", async () => {
+    stubWildcardUpstream(
+      new Response("cached", { headers: { "Access-Control-Allow-Origin": "*" } }),
+    );
+
+    const res = await worker.fetch(proxied("https://evil.com"), env, ctx);
+
+    expect(res.headers.get("X-Cache")).toBe("HIT");
+    expect(res.headers.get("Access-Control-Allow-Origin")).toBeNull();
+  });
+
+  it("上游 CORS 头不写入边缘缓存", async () => {
+    const { stored } = stubWildcardUpstream();
+
+    const res = await worker.fetch(proxied("https://kanochan.net"), env, ctx);
+    await res.text();
+
+    const cached = stored();
+    expect(cached).toBeDefined();
+    expect(cached!.headers.get("Access-Control-Allow-Origin")).toBeNull();
+  });
 });
 
 describe("上游转发与边缘缓存", () => {

@@ -45,6 +45,17 @@ const HEALTH_SUBJECT_ID = "2585";
 const DEFAULT_CACHE_TTL = 300;
 const SEARCH_PATH = "/v0/search/subjects";
 
+// 上游响应自带的 CORS 头：api.bgm.tv 与 lain.bgm.tv 都会下发 Access-Control-Allow-Origin: *，
+// 透传会绕过白名单（白名单外的来源也能读到响应），进缓存与出站前必须清除，再由 applyCors 按白名单重建
+const UPSTREAM_CORS_HEADERS = [
+  "access-control-allow-origin",
+  "access-control-allow-credentials",
+  "access-control-allow-headers",
+  "access-control-allow-methods",
+  "access-control-expose-headers",
+  "access-control-max-age",
+];
+
 // 转发时丢弃的逐跳/平台注入头
 const STRIPPED_HEADERS = [
   "host",
@@ -163,7 +174,9 @@ async function fromUpstream(
     upstreamResponse.body !== null &&
     contentType.includes("json");
   if (!rewriteable) {
-    return new Response(upstreamResponse.body, upstreamResponse);
+    const passthrough = new Response(upstreamResponse.body, upstreamResponse);
+    stripUpstreamCors(passthrough.headers);
+    return passthrough;
   }
 
   // 读取正文会触发 runtime 解压，改写后必须删除过期的编码/长度头（平台会自动重新压缩）
@@ -183,6 +196,7 @@ async function fromUpstream(
   const out = new Response(text, upstreamResponse);
   out.headers.delete("content-encoding");
   out.headers.delete("content-length");
+  stripUpstreamCors(out.headers);
   return out;
 }
 
@@ -420,7 +434,14 @@ function corsHeaders(request: Request, env: Env): Record<string, string> {
   return headers;
 }
 
+function stripUpstreamCors(headers: Headers): void {
+  for (const name of UPSTREAM_CORS_HEADERS) headers.delete(name);
+}
+
 function applyCors(headers: Headers, request: Request, env: Env): void {
+  // 出站前先清除上游 CORS 头：历史缓存里可能残留 Access-Control-Allow-Origin: *（命中路径原样复制），
+  // 不清除会让白名单外的来源读到响应，白名单形同虚设
+  stripUpstreamCors(headers);
   const existingVary = headers.get("Vary");
   for (const [name, value] of Object.entries(corsHeaders(request, env))) {
     headers.set(name, value);

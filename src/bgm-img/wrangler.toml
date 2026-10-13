@@ -7,6 +7,21 @@ compatibility_date = "2026-10-12"
 # 写在 [vars] 之后会被解析成环境变量 vars.routes，而非路由配置。
 routes = [{ pattern = "bgm-img.kanochan.net", custom_domain = true }]
 
+# 可观测性：日志进 Workers Logs；异常、5xx 自动聚合成 Issues（在 Issues 面板查看）
+[observability]
+enabled = true
+
+[observability.logs]
+enabled = true
+head_sampling_rate = 1
+
+[observability.traces]
+enabled = true
+head_sampling_rate = 0.01
+
+[observability.issues]
+enabled = true
+
 # CORS 白名单：逗号分隔，只允许这些来源跨域访问（覆盖 worker.ts 中的默认值）
 [vars]
 CORS_ALLOWED_ORIGINS = "https://kanochan.net,https://kanochan.com"

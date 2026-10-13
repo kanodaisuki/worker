@@ -2,6 +2,7 @@
  * Bangumi API 反向代理：把任意路径透明转发到 https://api.bgm.tv，
  * 并附加 CORS 白名单、User-Agent 与边缘缓存，用于信息检索。
  * JSON 成功响应里的图片地址（lain.bgm.tv）会被改写为图片反向代理地址。
+ * 附带链路自检（GET /health 与 Cron）与图片主机哨兵，用于检测上游图片主机变化等故障。
  */
 
 /** Worker 环境变量（wrangler.toml 的 [vars]） */
@@ -26,8 +27,20 @@ const DEFAULT_ALLOWED_ORIGINS = ["https://kanochan.net", "https://kanochan.com"]
 const DEFAULT_IMAGE_PROXY_ORIGIN = "https://bgm-img.kanochan.net";
 
 // 图片主机：只改写该主机的地址（bgm.tv 是条目网页地址，不是图片，不改写）
-// 同时覆盖 http://、https:// 与协议相对 // 三种形式
-const IMAGE_URL_PATTERN = /(?:https?:)?\/\/lain\.bgm\.tv/g;
+// 同时覆盖 http://、https:// 与协议相对 // 三种形式；主机后须为路径/查询/结尾，防 lain.bgm.tv.evil.com 误伤
+const IMAGE_URL_PATTERN = /(?:https?:)?\/\/lain\.bgm\.tv(?=[/?#]|$)/g;
+
+// 与 IMAGE_URL_PATTERN 同边界，锚定字符串开头；不带 g，避免 test() 的 lastIndex 状态
+const IMAGE_URL_PREFIX = /^(?:https?:)?\/\/lain\.bgm\.tv(?=[/?#]|$)/;
+
+// URL 形态的字符串（含协议相对）
+const URL_LIKE = /^(?:https?:)?\/\//;
+
+// 图片字段：这些字段的值（含 images 对象的每个值）是图片地址，主机不在改写规则内时告警
+const IMAGE_FIELDS = new Set(["image", "avatar"]);
+
+// 链路自检的上游样本条目（稳定、长期存在）
+const HEALTH_SUBJECT_ID = "2585";
 
 const DEFAULT_CACHE_TTL = 300;
 const SEARCH_PATH = "/v0/search/subjects";
@@ -67,11 +80,20 @@ export default {
           name: "Bangumi API proxy",
           upstream: UPSTREAM_ORIGIN,
           docs: "https://bangumi.github.io/api/",
-          examples: ["POST /v0/search/subjects", "GET /v0/subjects/2585", "GET /calendar"],
+          examples: [
+            "POST /v0/search/subjects",
+            "GET /v0/subjects/2585",
+            "GET /calendar",
+            "GET /health",
+          ],
         },
         request,
         env,
       );
+    }
+
+    if (request.method === "GET" && url.pathname === "/health") {
+      return healthResponse(env, request);
     }
 
     try {
@@ -79,6 +101,11 @@ export default {
     } catch (err) {
       return json(502, { error: "bad_gateway", message: String(err) }, request, env);
     }
+  },
+
+  // Cron 定时链路自检（wrangler.toml 的 [triggers]），结果只记日志，由 Workers Issues 告警
+  async scheduled(_controller: ScheduledController, env: Env): Promise<void> {
+    logHealth(await healthCheck(env));
   },
 } satisfies ExportedHandler<Env>;
 
@@ -109,7 +136,7 @@ async function proxy(request: Request, env: Env, ctx: ExecutionContext): Promise
     response.headers.set("X-Cache", "HIT");
   } else {
     const upstreamResponse = await fetch(upstreamUrl, init);
-    response = await fromUpstream(upstreamResponse, imageProxyOrigin(env));
+    response = await fromUpstream(upstreamResponse, imageProxyOrigin(env), url.pathname);
     response.headers.set("X-Cache", "MISS");
 
     const ttl = cacheTtl(url.pathname);
@@ -124,7 +151,11 @@ async function proxy(request: Request, env: Env, ctx: ExecutionContext): Promise
 }
 
 // 构造返回给客户端的响应：JSON 成功响应改写图片地址，其余压缩流原样透传
-async function fromUpstream(upstreamResponse: Response, proxyOrigin: string): Promise<Response> {
+async function fromUpstream(
+  upstreamResponse: Response,
+  proxyOrigin: string,
+  path: string,
+): Promise<Response> {
   const contentType = upstreamResponse.headers.get("content-type") || "";
   const rewriteable =
     proxyOrigin !== "" &&
@@ -136,20 +167,55 @@ async function fromUpstream(upstreamResponse: Response, proxyOrigin: string): Pr
   }
 
   // 读取正文会触发 runtime 解压，改写后必须删除过期的编码/长度头（平台会自动重新压缩）
-  const text = await upstreamResponse.text();
-  const out = new Response(rewriteImageUrls(text, proxyOrigin), upstreamResponse);
+  const { text, unknownHosts } = rewriteImageUrls(await upstreamResponse.text(), proxyOrigin);
+  // 层1 哨兵：图片字段出现改写规则外的主机（上游图片主机可能已变化），每响应一条结构化告警
+  if (unknownHosts.length > 0) {
+    console.error(
+      JSON.stringify({
+        event: "image_host_unrecognized",
+        path,
+        hosts: [...new Set(unknownHosts.map((u) => u.host))],
+        field: unknownHosts[0]?.field,
+        sample: unknownHosts[0]?.sample,
+      }),
+    );
+  }
+  const out = new Response(text, upstreamResponse);
   out.headers.delete("content-encoding");
   out.headers.delete("content-length");
   return out;
 }
 
+/** 图片字段中的地址引用（images.<尺寸>、image、avatar） */
+interface ImageUrlRef {
+  field: string;
+  url: string;
+}
+
+/** 图片字段中未被改写规则识别的地址 */
+interface UnknownImageHost {
+  field: string;
+  host: string;
+  sample: string;
+}
+
+/** 改写结果：改写后的正文与未识别的图片主机 */
+interface RewriteOutcome {
+  text: string;
+  unknownHosts: UnknownImageHost[];
+}
+
 // JSON 解析 → 逐个字符串值改写 → 重新序列化。
 // 解析会还原上游的 \/ 转义，因此无需关心上游的转义形式；非法 JSON 原样返回
-function rewriteImageUrls(text: string, proxyOrigin: string): string {
+function rewriteImageUrls(text: string, proxyOrigin: string): RewriteOutcome {
   try {
-    return JSON.stringify(replaceStrings(JSON.parse(text), proxyOrigin));
+    const parsed: unknown = JSON.parse(text);
+    return {
+      text: JSON.stringify(replaceStrings(parsed, proxyOrigin)),
+      unknownHosts: unrecognizedImageHosts(parsed),
+    };
   } catch {
-    return text;
+    return { text, unknownHosts: [] };
   }
 }
 
@@ -167,12 +233,149 @@ function replaceStrings(value: unknown, proxyOrigin: string): unknown {
   return value;
 }
 
+// 递归收集图片字段里的地址：images 对象的每个值，以及 image / avatar 字段
+function collectImageUrls(value: unknown, key = ""): ImageUrlRef[] {
+  const out: ImageUrlRef[] = [];
+  if (typeof value === "string") {
+    if (IMAGE_FIELDS.has(key) && URL_LIKE.test(value)) out.push({ field: key, url: value });
+    return out;
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) out.push(...collectImageUrls(item, key));
+    return out;
+  }
+  if (value !== null && typeof value === "object") {
+    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+      if (k === "images" && v !== null && typeof v === "object" && !Array.isArray(v)) {
+        for (const [size, u] of Object.entries(v as Record<string, unknown>)) {
+          if (typeof u === "string" && URL_LIKE.test(u)) {
+            out.push({ field: `images.${size}`, url: u });
+          }
+        }
+        continue;
+      }
+      out.push(...collectImageUrls(v, k));
+    }
+  }
+  return out;
+}
+
+function unrecognizedImageHosts(parsed: unknown): UnknownImageHost[] {
+  const out: UnknownImageHost[] = [];
+  for (const { field, url } of collectImageUrls(parsed)) {
+    if (!IMAGE_URL_PREFIX.test(url)) out.push({ field, host: imageUrlHost(url), sample: url });
+  }
+  return out;
+}
+
+function imageUrlHost(url: string): string {
+  return /(?:https?:)?\/\/([^/?#]+)/.exec(url)?.[1] ?? "";
+}
+
 function imageProxyOrigin(env: Env): string {
   const raw =
     env && env.IMAGE_PROXY_ORIGIN !== undefined
       ? env.IMAGE_PROXY_ORIGIN
       : DEFAULT_IMAGE_PROXY_ORIGIN;
   return raw.trim().replace(/\/+$/, "");
+}
+
+/** 链路自检结果 */
+interface HealthCheckResult {
+  ok: boolean;
+  /** 失败的检查项；空数组 = 全链路正常 */
+  failed: string[];
+  checks: Record<string, unknown>;
+}
+
+// 层2 链路自检：上游样本 → 图片主机规则 → 改写结果 → 经 bgm-img 实取图片
+async function healthCheck(env: Env): Promise<HealthCheckResult> {
+  const failed: string[] = [];
+  const checks: Record<string, unknown> = {};
+  const result = (): HealthCheckResult => ({ ok: failed.length === 0, failed, checks });
+
+  // 1. 上游条目样本（直连，不经缓存与改写）
+  let text = "";
+  try {
+    const res = await fetch(`${UPSTREAM_ORIGIN}/v0/subjects/${HEALTH_SUBJECT_ID}`, {
+      headers: {
+        "User-Agent": USER_AGENT,
+        Accept: "application/json",
+        "Accept-Encoding": "gzip",
+      },
+    });
+    checks.upstream = res.status;
+    if (res.status === 200) text = await res.text();
+  } catch (err) {
+    checks.upstream = String(err);
+  }
+  if (!text) {
+    failed.push("upstream");
+    return result();
+  }
+
+  // 2. 图片地址规则：样本必须有图片字段，且主机都在改写规则内
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    failed.push("upstream_body");
+    return result();
+  }
+  const imageUrls = collectImageUrls(parsed);
+  checks.image_count = imageUrls.length;
+  if (imageUrls.length === 0) {
+    failed.push("image_field_missing");
+    return result();
+  }
+  const unknown = unrecognizedImageHosts(parsed);
+  if (unknown.length > 0) {
+    checks.image_host_unknown = unknown[0];
+    failed.push("image_host");
+    return result();
+  }
+
+  // 改写禁用（IMAGE_PROXY_ORIGIN 为空）时跳过后续检查
+  const proxyOrigin = imageProxyOrigin(env);
+  if (proxyOrigin === "") {
+    checks.rewrite = "disabled";
+    return result();
+  }
+
+  // 3. 改写结果：首个图片地址应改写为代理地址
+  const rewritten = imageUrls[0]?.url.replace(IMAGE_URL_PATTERN, proxyOrigin) ?? "";
+  checks.rewrite_sample = rewritten;
+  if (!rewritten.startsWith(proxyOrigin)) {
+    failed.push("rewrite");
+    return result();
+  }
+
+  // 4. 经 bgm-img 实取图片
+  try {
+    const img = await fetch(rewritten, { method: "HEAD" });
+    const type = img.headers.get("content-type") || "";
+    checks.image_fetch = `${img.status} ${type}`.trim();
+    if (img.status !== 200 || !type.startsWith("image/")) failed.push("image_fetch");
+  } catch (err) {
+    checks.image_fetch = String(err);
+    failed.push("image_fetch");
+  }
+  return result();
+}
+
+// 自检结果记入 Workers Logs（成功 console.log；失败 console.error → Workers Issues → Automation 告警）
+function logHealth(result: HealthCheckResult): void {
+  const entry = JSON.stringify({ event: "health_check", ...result });
+  if (result.ok) console.log(entry);
+  else console.error(entry);
+}
+
+async function healthResponse(env: Env, request: Request): Promise<Response> {
+  const result = await healthCheck(env);
+  logHealth(result);
+  const res = json(result.ok ? 200 : 503, result, request, env);
+  res.headers.set("Cache-Control", "no-store");
+  return res;
 }
 
 // GET 直接按 URL 缓存；搜索接口是 POST，按 URL + 请求体哈希缓存

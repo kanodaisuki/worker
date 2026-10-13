@@ -50,6 +50,10 @@ curl https://bgm-img.kanochan.net/r/200/pic/cover/l/5b/e2/2785_5IaII.jpg
 - **缓存**：GET/HEAD 按 URL 缓存（HEAD 归入 GET 键），成功响应缓存 30 天并附 `Cache-Control: public, max-age=2592000`；响应头 `X-Cache: HIT/MISS` 表示是否命中边缘缓存。非 200 响应（404 等）透传且不写缓存。
 - **转发**：只透传条件请求头（`If-None-Match`、`If-Modified-Since`），固定 `Accept-Encoding: gzip` 保证缓存表示对所有客户端一致；Cookie 等其余请求头一律丢弃，避免泄漏与缓存旁路。仅支持 `GET`/`HEAD`，其余方法返回 405；上游异常返回 502。
 
+## 故障监测
+
+[wrangler.toml](./wrangler.toml) 已启用 Workers Logs 与 [Issues](https://developers.cloudflare.com/workers/observability/issues/)：异常与 5xx 响应自动聚合成 Issue，在 Workers 的 **Issues** 面板查看。端到端链路由 [bgm-api 的链路自检](../bgm-api/README.md#故障监测)（`GET /health` 与 Cron）覆盖；上游主机（`UPSTREAM_ORIGIN`）变化时的恢复步骤见 bgm-api 文档的恢复手册。
+
 ## 配置
 
 | 位置                             | 项                            | 说明                                        |

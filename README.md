@@ -20,6 +20,6 @@ pnpm deploy:transformations     # 只部署 transformations
 
 各 Worker 的配置、路由、行为与使用说明见各自目录下的文档：
 
-- [src/bgm-api/README.md](./src/bgm-api/README.md) — Bangumi API 反向代理：CORS 白名单、边缘缓存、图片地址改写、自定义域名绑定
+- [src/bgm-api/README.md](./src/bgm-api/README.md) — Bangumi API 反向代理：CORS 白名单、边缘缓存、图片地址改写、链路自检与故障监测
 - [src/bgm-img/README.md](./src/bgm-img/README.md) — Bangumi 图片反向代理：CORS 白名单、30 天边缘缓存、自定义域名绑定
 - [src/transformations/README.md](./src/transformations/README.md) — 图片变换：宽度阶梯、WebP 输出、失败回退

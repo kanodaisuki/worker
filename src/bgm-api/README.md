@@ -50,6 +50,34 @@ curl https://bgm-api.example.workers.dev/calendar
 - **缓存**：GET 按 URL 缓存；搜索接口 `POST /v0/search/subjects` 按 URL + 请求体哈希缓存。响应头 `X-Cache: HIT/MISS` 表示是否命中边缘缓存；搜索结果缓存 5 分钟，条目/人物/角色详情（`/v0/(subjects|persons|characters)/<id>`）缓存 1 小时，成功响应附 `Cache-Control: public, max-age=...`。
 - **转发**：剔除逐跳与平台注入的请求头（`cf-ray`、`x-forwarded-for` 等），固定 `Accept-Encoding: gzip` 保证缓存表示对所有客户端一致；上游异常返回 502。改写路径下正文已解压并重新序列化，`Content-Encoding`/`Content-Length` 会被删除（平台自动重新压缩）；非 JSON、非 200 等其余响应按压缩流原样透传。
 
+## 故障监测
+
+链路依赖本 Worker 的 `IMAGE_URL_PATTERN` 与 [bgm-img](../bgm-img) 的 `UPSTREAM_ORIGIN` 两个常量，上游图片主机一旦变化全链路会静默失效。两层防护：
+
+- **运行时哨兵**：改写时按图片字段（`images` 各值、`image`、`avatar`）校验主机，发现改写规则外的主机即输出一条结构化告警日志（每响应一条，不刷屏）；地址保留原值不改写，避免错误代理：
+
+  ```json
+  {
+    "event": "image_host_unrecognized",
+    "path": "/v0/subjects/2585",
+    "hosts": ["img.bgm.tv"],
+    "field": "images.large",
+    "sample": "https://img.bgm.tv/..."
+  }
+  ```
+
+- **链路自检**：`GET /health` 与 Cron（每 10 分钟）执行四段校验——上游样本（`/v0/subjects/2585`）→ 图片主机规则 → 改写结果 → 经 bgm-img 实取图片（200 + `image/*`）。成功返回 `200 {ok:true}` 并记 `health_check` 日志；失败返回 `503 {ok:false,failed:[...]}` 并输出同名告警日志。`failed` 取值：`upstream`/`upstream_body`/`image_field_missing`/`image_host`/`rewrite`/`image_fetch`。
+
+告警记录：`console.error` 日志 → [Workers Issues](https://developers.cloudflare.com/workers/observability/issues/)（异常、5xx、error 日志自动聚合，免费公测）。直接在 Workers 的 **Issues** 面板查看即可，[wrangler.toml](./wrangler.toml) 的 `[observability.issues]` 已开启，无需额外配置。
+
+如需外部推送，可在 **Issues → Automations** 配置 Generic webhook / Chat 等目的地（注意：目的地不支持邮件，面板中没有邮件选项）。
+
+**恢复手册**（收到 `image_host_unrecognized` / `image_host` 告警时）：
+
+1. `curl https://api.bgm.tv/v0/subjects/2585` 确认新的图片主机
+2. 修改 [worker.ts](./worker.ts) 的 `IMAGE_URL_PATTERN` 与 `IMAGE_URL_PREFIX`，以及 [../bgm-img/worker.ts](../bgm-img/worker.ts) 的 `UPSTREAM_ORIGIN`
+3. `pnpm deploy` 后 `curl https://bgm-api.kanochan.net/health` 验证
+
 ## 配置
 
 | 位置                             | 项                            | 说明                                        |

@@ -12,6 +12,7 @@ const ctx = {
 
 afterEach(() => {
   vi.unstubAllGlobals();
+  vi.restoreAllMocks();
 });
 
 function preflight(origin?: string): Request {
@@ -344,5 +345,216 @@ describe("图片地址改写", () => {
 
     expect(res.status).toBe(304);
     expect(putKeys).toHaveLength(0);
+  });
+});
+
+describe("故障监测与自检", () => {
+  function spyConsole(): { errors: string[]; logs: string[] } {
+    const errors: string[] = [];
+    const logs: string[] = [];
+    vi.spyOn(console, "error").mockImplementation((msg?: unknown) => {
+      errors.push(String(msg));
+    });
+    vi.spyOn(console, "log").mockImplementation((msg?: unknown) => {
+      logs.push(String(msg));
+    });
+    return { errors, logs };
+  }
+
+  function stubFetchByUrl(impl: (url: string) => Response): string[] {
+    const urls: string[] = [];
+    vi.stubGlobal("fetch", (input: RequestInfo | URL) => {
+      const url = input instanceof Request ? input.url : String(input);
+      urls.push(url);
+      return Promise.resolve(impl(url));
+    });
+    return urls;
+  }
+
+  function stubNoCache(): void {
+    vi.stubGlobal("caches", {
+      default: { match: async () => null, put: async () => {} },
+    });
+  }
+
+  function jsonUpstream(body: string, status = 200): Response {
+    return new Response(body, {
+      status,
+      headers: { "Content-Type": "application/json" },
+    });
+  }
+
+  // 自检样本：与真实上游一致的图片字段
+  const healthySubject = JSON.stringify({
+    images: { large: "http://lain.bgm.tv/pic/cover/l/2585_a.jpg" },
+  });
+
+  it("图片字段出现未知主机时输出一条结构化告警且保留原地址", async () => {
+    const sp = spyConsole();
+    stubNoCache();
+    stubFetchByUrl(() =>
+      jsonUpstream(
+        '{"images":{"large":"https://img.bgm.tv/pic/cover/l/a.jpg"},"url":"http://bgm.tv/subject/1"}',
+      ),
+    );
+
+    const res = await worker.fetch(new Request("https://proxy.test/v0/subjects/1"), env, ctx);
+    const body = (await res.json()) as { images: { large: string } };
+
+    // 哨兵只告警不改写：未知主机保留原值，避免错误代理
+    expect(body.images.large).toBe("https://img.bgm.tv/pic/cover/l/a.jpg");
+    expect(sp.errors).toHaveLength(1);
+    const evt = JSON.parse(sp.errors[0]!) as {
+      event: string;
+      hosts: string[];
+      field: string;
+      sample: string;
+    };
+    expect(evt.event).toBe("image_host_unrecognized");
+    expect(evt.hosts).toEqual(["img.bgm.tv"]);
+    expect(evt.field).toBe("images.large");
+    expect(evt.sample).toBe("https://img.bgm.tv/pic/cover/l/a.jpg");
+  });
+
+  it("图片主机正常时不产生告警", async () => {
+    const sp = spyConsole();
+    stubNoCache();
+    stubFetchByUrl(() => jsonUpstream(healthySubject));
+
+    const res = await worker.fetch(new Request("https://proxy.test/v0/subjects/1"), env, ctx);
+    await res.text();
+
+    expect(sp.errors).toHaveLength(0);
+    expect(sp.logs).toHaveLength(0);
+  });
+
+  it("/health 全链路正常返回 200", async () => {
+    const sp = spyConsole();
+    stubNoCache();
+    const urls = stubFetchByUrl((url) =>
+      url.startsWith("https://api.bgm.tv/")
+        ? jsonUpstream(healthySubject)
+        : new Response(null, { status: 200, headers: { "Content-Type": "image/jpeg" } }),
+    );
+
+    const res = await worker.fetch(new Request("https://proxy.test/health"), env, ctx);
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get("Cache-Control")).toBe("no-store");
+    const body = (await res.json()) as {
+      ok: boolean;
+      failed: string[];
+      checks: Record<string, unknown>;
+    };
+    expect(body.ok).toBe(true);
+    expect(body.failed).toEqual([]);
+    expect(body.checks.image_count).toBe(1);
+    expect(body.checks.rewrite_sample).toBe("https://bgm-img.kanochan.net/pic/cover/l/2585_a.jpg");
+    // 第二跳：经 bgm-img 实取图片
+    expect(urls[1]).toBe("https://bgm-img.kanochan.net/pic/cover/l/2585_a.jpg");
+    expect(sp.logs).toHaveLength(1);
+    expect((JSON.parse(sp.logs[0]!) as { event: string }).event).toBe("health_check");
+    expect(sp.errors).toHaveLength(0);
+  });
+
+  it("/health 检出上游图片主机变化返回 503", async () => {
+    const sp = spyConsole();
+    stubNoCache();
+    stubFetchByUrl(() =>
+      jsonUpstream('{"images":{"large":"https://img.bgm.tv/pic/cover/l/a.jpg"}}'),
+    );
+
+    const res = await worker.fetch(new Request("https://proxy.test/health"), env, ctx);
+
+    expect(res.status).toBe(503);
+    const body = (await res.json()) as {
+      ok: boolean;
+      failed: string[];
+      checks: Record<string, unknown>;
+    };
+    expect(body.ok).toBe(false);
+    expect(body.failed).toEqual(["image_host"]);
+    const issue = body.checks.image_host_unknown as { host: string; sample: string };
+    expect(issue.host).toBe("img.bgm.tv");
+    expect(sp.errors).toHaveLength(1);
+  });
+
+  it("/health 取图失败返回 503", async () => {
+    spyConsole();
+    stubNoCache();
+    stubFetchByUrl((url) =>
+      url.startsWith("https://api.bgm.tv/")
+        ? jsonUpstream(healthySubject)
+        : new Response("not found", { status: 404 }),
+    );
+
+    const res = await worker.fetch(new Request("https://proxy.test/health"), env, ctx);
+
+    expect(res.status).toBe(503);
+    const body = (await res.json()) as { failed: string[]; checks: Record<string, unknown> };
+    expect(body.failed).toEqual(["image_fetch"]);
+    expect(body.checks.image_fetch).toContain("404");
+  });
+
+  it("/health 图片字段消失返回 503", async () => {
+    spyConsole();
+    stubNoCache();
+    stubFetchByUrl(() => jsonUpstream('{"name":"命运石之门"}'));
+
+    const res = await worker.fetch(new Request("https://proxy.test/health"), env, ctx);
+
+    expect(res.status).toBe(503);
+    const body = (await res.json()) as { failed: string[] };
+    expect(body.failed).toEqual(["image_field_missing"]);
+  });
+
+  it("/health 上游异常返回 503", async () => {
+    spyConsole();
+    stubNoCache();
+    vi.stubGlobal("fetch", () => Promise.reject(new Error("network down")));
+
+    const res = await worker.fetch(new Request("https://proxy.test/health"), env, ctx);
+
+    expect(res.status).toBe(503);
+    const body = (await res.json()) as { failed: string[] };
+    expect(body.failed).toEqual(["upstream"]);
+  });
+
+  it("IMAGE_PROXY_ORIGIN 置空时 /health 跳过改写与取图检查", async () => {
+    spyConsole();
+    stubNoCache();
+    const urls = stubFetchByUrl((url) =>
+      url.startsWith("https://api.bgm.tv/")
+        ? jsonUpstream(healthySubject)
+        : new Response(null, { status: 200, headers: { "Content-Type": "image/jpeg" } }),
+    );
+
+    const res = await worker.fetch(
+      new Request("https://proxy.test/health"),
+      { ...env, IMAGE_PROXY_ORIGIN: "" },
+      ctx,
+    );
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { checks: Record<string, unknown> };
+    expect(body.checks.rewrite).toBe("disabled");
+    expect(urls).toHaveLength(1);
+  });
+
+  it("scheduled 自检失败时输出告警日志", async () => {
+    const sp = spyConsole();
+    vi.stubGlobal("fetch", () => Promise.reject(new Error("network down")));
+
+    await worker.scheduled(
+      { scheduledTime: Date.now(), noRetry: () => {} } as unknown as ScheduledController,
+      env,
+    );
+
+    expect(sp.logs).toHaveLength(0);
+    expect(sp.errors).toHaveLength(1);
+    const evt = JSON.parse(sp.errors[0]!) as { event: string; ok: boolean; failed: string[] };
+    expect(evt.event).toBe("health_check");
+    expect(evt.ok).toBe(false);
+    expect(evt.failed).toEqual(["upstream"]);
   });
 });

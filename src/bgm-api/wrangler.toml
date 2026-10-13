@@ -7,6 +7,26 @@ compatibility_date = "2026-10-12"
 # 写在 [vars] 之后会被解析成环境变量 vars.routes，而非路由配置。
 routes = [{ pattern = "bgm-api.kanochan.net", custom_domain = true }]
 
+# 链路自检：每 10 分钟一次（约 144 次/天，符合 Bangumi Fair Use），见 worker.ts 的 scheduled
+[triggers]
+crons = ["*/10 * * * *"]
+
+# 可观测性：日志进 Workers Logs；异常、5xx、console.error 自动聚合成 Issues（在 Issues 面板
+# 查看），traces 需单独开启
+[observability]
+enabled = true
+
+[observability.logs]
+enabled = true
+head_sampling_rate = 1
+
+[observability.traces]
+enabled = true
+head_sampling_rate = 0.01
+
+[observability.issues]
+enabled = true
+
 # CORS 白名单：逗号分隔，只允许这些来源跨域访问（覆盖 worker.ts 中的默认值）
 # IMAGE_PROXY_ORIGIN：图片反向代理源站，响应体里的图片地址会改写为该地址，置空禁用
 [vars]

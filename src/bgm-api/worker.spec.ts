@@ -175,3 +175,174 @@ describe("上游转发与边缘缓存", () => {
     expect(body.error).toBe("bad_gateway");
   });
 });
+
+describe("图片地址改写", () => {
+  function stubUpstream(response: Response): void {
+    vi.stubGlobal("fetch", () => Promise.resolve(response));
+  }
+
+  function jsonUpstream(body: string, status = 200): Response {
+    return new Response(body, {
+      status,
+      headers: { "Content-Type": "application/json" },
+    });
+  }
+
+  function stubCaches(): { putKeys: string[]; stored: () => Response | undefined } {
+    const putKeys: string[] = [];
+    let cached: Response | undefined;
+    vi.stubGlobal("caches", {
+      default: {
+        match: async () => null,
+        put: async (key: Request, value: Response) => {
+          putKeys.push(key.url);
+          cached = value;
+        },
+      },
+    });
+    return { putKeys, stored: () => cached };
+  }
+
+  it("JSON 里的图片地址改写为图片代理地址（含转义斜杠与嵌入文本的 URL）", async () => {
+    // 上游真实格式：http 协议 + JSON 转义斜杠（\/）
+    stubUpstream(
+      jsonUpstream(
+        '{"images":{"large":"http:\\/\\/lain.bgm.tv\\/pic\\/cover\\/l\\/390200_Z9jPp.jpg",' +
+          '"medium":"https://lain.bgm.tv/pic/cover/m/390200_Z9jPp.jpg"},' +
+          '"url":"http://bgm.tv/subject/390200",' +
+          '"summary":"封面见 http://lain.bgm.tv/pic/cover/s/390200_Z9jPp.jpg"}',
+      ),
+    );
+    stubCaches();
+
+    const res = await worker.fetch(new Request("https://proxy.test/v0/subjects/390200"), env, ctx);
+
+    const body = (await res.json()) as {
+      images: { large: string; medium: string };
+      url: string;
+      summary: string;
+    };
+    expect(body.images.large).toBe("https://bgm-img.kanochan.net/pic/cover/l/390200_Z9jPp.jpg");
+    expect(body.images.medium).toBe("https://bgm-img.kanochan.net/pic/cover/m/390200_Z9jPp.jpg");
+    expect(body.summary).toBe("封面见 https://bgm-img.kanochan.net/pic/cover/s/390200_Z9jPp.jpg");
+    // bgm.tv 是条目网页地址而非图片，保持不变
+    expect(body.url).toBe("http://bgm.tv/subject/390200");
+  });
+
+  it("协议相对地址也改写，统一为 https 代理地址", async () => {
+    stubUpstream(jsonUpstream('{"u":"//lain.bgm.tv/pic/x.jpg"}'));
+    stubCaches();
+
+    const res = await worker.fetch(new Request("https://proxy.test/v0/subjects/1"), env, ctx);
+
+    const body = (await res.json()) as { u: string };
+    expect(body.u).toBe("https://bgm-img.kanochan.net/pic/x.jpg");
+  });
+
+  it("非 JSON 响应原样透传，保留 Content-Encoding", async () => {
+    const upstream = new Response("raw lain.bgm.tv", {
+      status: 200,
+      headers: { "Content-Type": "text/plain", "Content-Encoding": "gzip" },
+    });
+    stubUpstream(upstream);
+    stubCaches();
+
+    const res = await worker.fetch(new Request("https://proxy.test/v0/subjects/1"), env, ctx);
+
+    expect(await res.text()).toBe("raw lain.bgm.tv");
+    expect(res.headers.get("Content-Encoding")).toBe("gzip");
+  });
+
+  it("非 200 响应不改写", async () => {
+    stubUpstream(jsonUpstream('{"cover":"http://lain.bgm.tv/x.jpg"}', 404));
+    const { putKeys } = stubCaches();
+
+    const res = await worker.fetch(new Request("https://proxy.test/v0/subjects/1"), env, ctx);
+
+    expect(res.status).toBe(404);
+    const body = (await res.json()) as { cover: string };
+    expect(body.cover).toBe("http://lain.bgm.tv/x.jpg");
+    expect(putKeys).toHaveLength(0);
+  });
+
+  it("非法 JSON 原文返回", async () => {
+    stubUpstream(jsonUpstream("{invalid"));
+    stubCaches();
+
+    const res = await worker.fetch(new Request("https://proxy.test/v0/subjects/1"), env, ctx);
+
+    expect(await res.text()).toBe("{invalid");
+  });
+
+  it("改写后删除 Content-Encoding 与 Content-Length", async () => {
+    const upstream = new Response('{"cover":"http://lain.bgm.tv/x.jpg"}', {
+      status: 200,
+      headers: {
+        "Content-Type": "application/json",
+        "Content-Encoding": "gzip",
+        "Content-Length": "123",
+      },
+    });
+    stubUpstream(upstream);
+    stubCaches();
+
+    const res = await worker.fetch(new Request("https://proxy.test/v0/subjects/1"), env, ctx);
+
+    expect(res.headers.get("Content-Encoding")).toBeNull();
+    expect(res.headers.get("Content-Length")).toBeNull();
+    const body = (await res.json()) as { cover: string };
+    expect(body.cover).toBe("https://bgm-img.kanochan.net/x.jpg");
+  });
+
+  it("边缘缓存写入改写后的正文", async () => {
+    stubUpstream(jsonUpstream('{"cover":"http://lain.bgm.tv/pic/cover/a.jpg"}'));
+    const { stored } = stubCaches();
+
+    const res = await worker.fetch(new Request("https://proxy.test/v0/subjects/1"), env, ctx);
+    await res.text();
+
+    const cached = stored();
+    expect(cached).toBeDefined();
+    const cachedText = await cached!.text();
+    expect(cachedText).toContain("https://bgm-img.kanochan.net/pic/cover/a.jpg");
+    expect(cachedText).not.toContain("lain.bgm.tv");
+  });
+
+  it("环境变量 IMAGE_PROXY_ORIGIN 覆盖默认代理地址（尾斜杠被规整）", async () => {
+    stubUpstream(jsonUpstream('{"u":"http://lain.bgm.tv/x.jpg"}'));
+    stubCaches();
+
+    const res = await worker.fetch(
+      new Request("https://proxy.test/v0/subjects/1"),
+      { ...env, IMAGE_PROXY_ORIGIN: "https://img.example.com/" },
+      ctx,
+    );
+
+    const body = (await res.json()) as { u: string };
+    expect(body.u).toBe("https://img.example.com/x.jpg");
+  });
+
+  it("IMAGE_PROXY_ORIGIN 置空禁用改写", async () => {
+    stubUpstream(jsonUpstream('{"u":"http://lain.bgm.tv/x.jpg"}'));
+    stubCaches();
+
+    const res = await worker.fetch(
+      new Request("https://proxy.test/v0/subjects/1"),
+      { ...env, IMAGE_PROXY_ORIGIN: "" },
+      ctx,
+    );
+
+    const body = (await res.json()) as { u: string };
+    expect(body.u).toBe("http://lain.bgm.tv/x.jpg");
+  });
+
+  it("304 无响应体透传且不写缓存", async () => {
+    stubUpstream(new Response(null, { status: 304 }));
+    const { putKeys } = stubCaches();
+
+    const res = await worker.fetch(new Request("https://proxy.test/v0/subjects/1"), env, ctx);
+
+    expect(res.status).toBe(304);
+    expect(putKeys).toHaveLength(0);
+  });
+});

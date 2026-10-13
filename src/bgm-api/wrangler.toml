@@ -8,6 +8,8 @@ compatibility_date = "2026-10-12"
 routes = [{ pattern = "bgm-api.kanochan.net", custom_domain = true }]
 
 # CORS 白名单：逗号分隔，只允许这些来源跨域访问（覆盖 worker.ts 中的默认值）
+# IMAGE_PROXY_ORIGIN：图片反向代理源站，响应体里的图片地址会改写为该地址，置空禁用
 [vars]
 CORS_ALLOWED_ORIGINS = "https://kanochan.net,https://kanochan.com"
+IMAGE_PROXY_ORIGIN = "https://bgm-img.kanochan.net"
 

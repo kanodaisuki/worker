@@ -1,12 +1,15 @@
 /**
  * Bangumi API 反向代理：把任意路径透明转发到 https://api.bgm.tv，
  * 并附加 CORS 白名单、User-Agent 与边缘缓存，用于信息检索。
+ * JSON 成功响应里的图片地址（lain.bgm.tv）会被改写为图片反向代理地址。
  */
 
 /** Worker 环境变量（wrangler.toml 的 [vars]） */
 interface Env {
   /** CORS 白名单，逗号分隔；未设置时回退到 DEFAULT_ALLOWED_ORIGINS */
   CORS_ALLOWED_ORIGINS?: string;
+  /** 图片反向代理源站，置空字符串禁用改写；未设置时回退到 DEFAULT_IMAGE_PROXY_ORIGIN */
+  IMAGE_PROXY_ORIGIN?: string;
 }
 
 const UPSTREAM_ORIGIN = "https://api.bgm.tv";
@@ -17,6 +20,14 @@ const USER_AGENT = "bgm-api-proxy/1.0 (https://github.com/kanodaisuki/worker)";
 // CORS 白名单：只允许这些来源跨域访问
 // 也可用 wrangler.toml 的 [vars].CORS_ALLOWED_ORIGINS 覆盖（逗号分隔，优先级更高）
 const DEFAULT_ALLOWED_ORIGINS = ["https://kanochan.net", "https://kanochan.com"];
+
+// 图片反向代理源站（如 https://bgm-img.kanochan.net），响应体里的图片地址会改写为该地址
+// 也可用 wrangler.toml 的 [vars].IMAGE_PROXY_ORIGIN 覆盖，置空字符串禁用改写
+const DEFAULT_IMAGE_PROXY_ORIGIN = "https://bgm-img.kanochan.net";
+
+// 图片主机：只改写该主机的地址（bgm.tv 是条目网页地址，不是图片，不改写）
+// 同时覆盖 http://、https:// 与协议相对 // 三种形式
+const IMAGE_URL_PATTERN = /(?:https?:)?\/\/lain\.bgm\.tv/g;
 
 const DEFAULT_CACHE_TTL = 300;
 const SEARCH_PATH = "/v0/search/subjects";
@@ -98,7 +109,7 @@ async function proxy(request: Request, env: Env, ctx: ExecutionContext): Promise
     response.headers.set("X-Cache", "HIT");
   } else {
     const upstreamResponse = await fetch(upstreamUrl, init);
-    response = new Response(upstreamResponse.body, upstreamResponse);
+    response = await fromUpstream(upstreamResponse, imageProxyOrigin(env));
     response.headers.set("X-Cache", "MISS");
 
     const ttl = cacheTtl(url.pathname);
@@ -110,6 +121,58 @@ async function proxy(request: Request, env: Env, ctx: ExecutionContext): Promise
 
   applyCors(response.headers, request, env);
   return response;
+}
+
+// 构造返回给客户端的响应：JSON 成功响应改写图片地址，其余压缩流原样透传
+async function fromUpstream(upstreamResponse: Response, proxyOrigin: string): Promise<Response> {
+  const contentType = upstreamResponse.headers.get("content-type") || "";
+  const rewriteable =
+    proxyOrigin !== "" &&
+    upstreamResponse.status === 200 &&
+    upstreamResponse.body !== null &&
+    contentType.includes("json");
+  if (!rewriteable) {
+    return new Response(upstreamResponse.body, upstreamResponse);
+  }
+
+  // 读取正文会触发 runtime 解压，改写后必须删除过期的编码/长度头（平台会自动重新压缩）
+  const text = await upstreamResponse.text();
+  const out = new Response(rewriteImageUrls(text, proxyOrigin), upstreamResponse);
+  out.headers.delete("content-encoding");
+  out.headers.delete("content-length");
+  return out;
+}
+
+// JSON 解析 → 逐个字符串值改写 → 重新序列化。
+// 解析会还原上游的 \/ 转义，因此无需关心上游的转义形式；非法 JSON 原样返回
+function rewriteImageUrls(text: string, proxyOrigin: string): string {
+  try {
+    return JSON.stringify(replaceStrings(JSON.parse(text), proxyOrigin));
+  } catch {
+    return text;
+  }
+}
+
+function replaceStrings(value: unknown, proxyOrigin: string): unknown {
+  if (typeof value === "string") return value.replace(IMAGE_URL_PATTERN, proxyOrigin);
+  if (Array.isArray(value)) return value.map((item) => replaceStrings(item, proxyOrigin));
+  if (value !== null && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value as Record<string, unknown>).map(([key, item]) => [
+        key,
+        replaceStrings(item, proxyOrigin),
+      ]),
+    );
+  }
+  return value;
+}
+
+function imageProxyOrigin(env: Env): string {
+  const raw =
+    env && env.IMAGE_PROXY_ORIGIN !== undefined
+      ? env.IMAGE_PROXY_ORIGIN
+      : DEFAULT_IMAGE_PROXY_ORIGIN;
+  return raw.trim().replace(/\/+$/, "");
 }
 
 // GET 直接按 URL 缓存；搜索接口是 POST，按 URL + 请求体哈希缓存

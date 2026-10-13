@@ -135,6 +135,102 @@ describe("CORS 白名单", () => {
   });
 });
 
+describe("Referer 防盗链", () => {
+  function stubProxy(): { calls: unknown[]; putKeys: string[] } {
+    const calls: unknown[] = [];
+    const putKeys: string[] = [];
+    vi.stubGlobal("fetch", (input: unknown) => {
+      calls.push(input);
+      return Promise.resolve(
+        new Response("img", {
+          status: 200,
+          headers: { "Content-Type": "image/jpeg" },
+        }),
+      );
+    });
+    vi.stubGlobal("caches", {
+      default: {
+        match: async () => null,
+        put: async (key: Request) => {
+          putKeys.push(key.url);
+        },
+      },
+    });
+    return { calls, putKeys };
+  }
+
+  function withReferer(referer: string): Request {
+    return new Request("https://proxy.test/r/200/pic/cover/l/5b/e2/2785_5IaII.jpg", {
+      headers: { Referer: referer },
+    });
+  }
+
+  it("白名单内的 Referer 放行", async () => {
+    stubProxy();
+
+    const res = await worker.fetch(withReferer("https://kanochan.net/subjects/1"), env, ctx);
+
+    expect(res.status).toBe(200);
+  });
+
+  it("白名单内的 Referer 只比对来源，其余域名成员也放行", async () => {
+    stubProxy();
+
+    const res = await worker.fetch(withReferer("https://kanochan.com/"), env, ctx);
+
+    expect(res.status).toBe(200);
+  });
+
+  it("白名单外的 Referer 返回 403，不回源也不写缓存", async () => {
+    const { calls, putKeys } = stubProxy();
+
+    const res = await worker.fetch(withReferer("https://evil.com/hotlink.html"), env, ctx);
+
+    expect(res.status).toBe(403);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toBe("forbidden_referer");
+    expect(calls).toHaveLength(0);
+    expect(putKeys).toHaveLength(0);
+  });
+
+  it("无 Referer 一律放行（直连 / curl / bgm-api 自检）", async () => {
+    stubProxy();
+
+    const res = await worker.fetch(
+      new Request("https://proxy.test/r/200/pic/cover/l/5b/e2/2785_5IaII.jpg"),
+      env,
+      ctx,
+    );
+
+    expect(res.status).toBe(200);
+  });
+
+  it("非法 Referer 拒绝", async () => {
+    const { calls } = stubProxy();
+
+    const res = await worker.fetch(withReferer("not a url"), env, ctx);
+
+    expect(res.status).toBe(403);
+    expect(calls).toHaveLength(0);
+  });
+
+  it("OPTIONS 预检不做 Referer 校验", async () => {
+    stubProxy();
+
+    const res = await worker.fetch(
+      new Request("https://proxy.test/r/200/pic/cover/l/5b/e2/2785_5IaII.jpg", {
+        method: "OPTIONS",
+        headers: { Origin: "https://kanochan.net", Referer: "https://evil.com/x" },
+      }),
+      env,
+      ctx,
+    );
+
+    expect(res.status).toBe(204);
+    expect(res.headers.get("Access-Control-Allow-Origin")).toBe("https://kanochan.net");
+  });
+});
+
 describe("上游转发与边缘缓存", () => {
   function stubCaches(cached?: Response) {
     const putKeys: string[] = [];

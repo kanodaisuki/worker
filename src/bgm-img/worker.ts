@@ -1,11 +1,11 @@
 /**
  * Bangumi 图片反向代理：把任意路径透明转发到 https://lain.bgm.tv，
- * 并附加 CORS 白名单与长时边缘缓存，用于动画封面等图片的跨域加载。
+ * 并附加 CORS 白名单、Referer 防盗链与长时边缘缓存，用于动画封面等图片的跨域加载。
  */
 
 /** Worker 环境变量（wrangler.toml 的 [vars]） */
 interface Env {
-  /** CORS 白名单，逗号分隔；未设置时回退到 DEFAULT_ALLOWED_ORIGINS */
+  /** CORS 与 Referer 防盗链白名单，逗号分隔；未设置时回退到 DEFAULT_ALLOWED_ORIGINS */
   CORS_ALLOWED_ORIGINS?: string;
 }
 
@@ -14,7 +14,7 @@ const UPSTREAM_ORIGIN = "https://lain.bgm.tv";
 // Bangumi Fair Use 要求可识别的 User-Agent，请替换为你的项目名和联系方式
 const USER_AGENT = "bgm-img-proxy/1.0 (https://github.com/kanodaisuki/worker)";
 
-// CORS 白名单：只允许这些来源跨域访问
+// CORS 与 Referer 防盗链白名单：只允许这些来源跨域访问 / 热链
 // 也可用 wrangler.toml 的 [vars].CORS_ALLOWED_ORIGINS 覆盖（逗号分隔，优先级更高）
 const DEFAULT_ALLOWED_ORIGINS = ["https://kanochan.net", "https://kanochan.com"];
 
@@ -57,6 +57,12 @@ export default {
         request,
         env,
       );
+    }
+
+    // Referer 防盗链：白名单外站点的热链（<img> 盗链会带上对方页面的 Referer）一律拒绝，
+    // 挡不住对方抹掉 Referer 的请求（Referrer-Policy: no-referrer 与非浏览器客户端）
+    if (!refererAllowed(request, env)) {
+      return json(403, { error: "forbidden_referer" }, request, env);
     }
 
     try {
@@ -158,6 +164,20 @@ function allowedOrigins(env: Env): string[] {
 
 function normalizeOrigin(value: string): string {
   return value.trim().replace(/\/+$/, "").toLowerCase();
+}
+
+// Referer 校验：有 Referer 时其来源必须在白名单内（与 CORS 共用一份白名单）。
+// 无 Referer 一律放行：直接打开 URL、curl、以及 bgm-api 链路自检的 HEAD 取图都不带 Referer
+function refererAllowed(request: Request, env: Env): boolean {
+  const referer = request.headers.get("Referer");
+  if (!referer) return true;
+  let origin: string;
+  try {
+    origin = new URL(referer).origin;
+  } catch {
+    return false;
+  }
+  return allowedOrigins(env).includes(normalizeOrigin(origin));
 }
 
 function json(status: number, body: unknown, request: Request, env: Env): Response {

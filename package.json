@@ -9,8 +9,9 @@
     "lint": "vp lint",
     "fmt": "vp fmt",
     "typecheck": "vp check --no-fmt --no-lint",
-    "deploy": "pnpm run deploy:bgm-api && pnpm run deploy:transformations",
+    "deploy": "pnpm run deploy:bgm-api && pnpm run deploy:bgm-img && pnpm run deploy:transformations",
     "deploy:bgm-api": "wrangler deploy --config src/bgm-api/wrangler.toml",
+    "deploy:bgm-img": "wrangler deploy --config src/bgm-img/wrangler.toml",
     "deploy:transformations": "wrangler deploy --config src/transformations/wrangler.toml"
   },
   "devDependencies": {

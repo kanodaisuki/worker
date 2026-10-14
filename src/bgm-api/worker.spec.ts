@@ -41,6 +41,33 @@ describe("CORS 白名单", () => {
     expect(res.headers.get("Access-Control-Allow-Origin")).toBe("https://kanochan.net");
   });
 
+  it("本地 localhost 来源不限端口，回显具体 Origin", async () => {
+    const res = await worker.fetch(preflight("http://localhost:5173"), env, ctx);
+    expect(res.headers.get("Access-Control-Allow-Origin")).toBe("http://localhost:5173");
+  });
+
+  it("127.0.0.1 与 [::1] 的本地来源同样放行", async () => {
+    const ipv4 = await worker.fetch(preflight("http://127.0.0.1:8080"), env, ctx);
+    expect(ipv4.headers.get("Access-Control-Allow-Origin")).toBe("http://127.0.0.1:8080");
+
+    const ipv6 = await worker.fetch(preflight("http://[::1]:3000"), env, ctx);
+    expect(ipv6.headers.get("Access-Control-Allow-Origin")).toBe("http://[::1]:3000");
+  });
+
+  it("本地来源不受 CORS_ALLOWED_ORIGINS 覆盖影响", async () => {
+    const res = await worker.fetch(
+      preflight("http://localhost:5173"),
+      { CORS_ALLOWED_ORIGINS: "https://other.com" },
+      ctx,
+    );
+    expect(res.headers.get("Access-Control-Allow-Origin")).toBe("http://localhost:5173");
+  });
+
+  it("伪装成本地域名的外部来源不放行", async () => {
+    const res = await worker.fetch(preflight("https://localhost.evil.com"), env, ctx);
+    expect(res.headers.get("Access-Control-Allow-Origin")).toBeNull();
+  });
+
   it("环境变量 CORS_ALLOWED_ORIGINS 覆盖默认白名单", async () => {
     const res = await worker.fetch(
       preflight("https://other.com"),

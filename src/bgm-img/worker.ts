@@ -16,6 +16,7 @@ const USER_AGENT = "bgm-img-proxy/1.0 (https://github.com/kanodaisuki/worker)";
 
 // CORS 与 Referer 防盗链白名单：只允许这些来源跨域访问 / 热链
 // 也可用 wrangler.toml 的 [vars].CORS_ALLOWED_ORIGINS 覆盖（逗号分隔，优先级更高）
+// localhost / 127.0.0.1 / [::1] 的本地调试来源（端口不限）始终放行，不受白名单与覆盖影响
 const DEFAULT_ALLOWED_ORIGINS = ["https://kanochan.net", "https://kanochan.com"];
 
 // 上游响应自带的 CORS 头：lain.bgm.tv 会下发 Access-Control-Allow-Origin: *，
@@ -128,10 +129,9 @@ function corsHeaders(request: Request, env: Env): Record<string, string> {
     Vary: "Origin",
   };
   const origin = request.headers.get("Origin");
-  // 只给白名单内的来源回显具体的 Origin，其余请求不带该头，由浏览器拦截
-  if (origin) {
-    const match = allowedOrigins(env).find((o) => o === normalizeOrigin(origin));
-    if (match) headers["Access-Control-Allow-Origin"] = match;
+  // 只给白名单内（或本地 localhost 调试来源）回显具体的 Origin，其余请求不带该头，由浏览器拦截
+  if (origin && isAllowedOrigin(origin, env)) {
+    headers["Access-Control-Allow-Origin"] = normalizeOrigin(origin);
   }
   return headers;
 }
@@ -166,7 +166,23 @@ function normalizeOrigin(value: string): string {
   return value.trim().replace(/\/+$/, "").toLowerCase();
 }
 
-// Referer 校验：有 Referer 时其来源必须在白名单内（与 CORS 共用一份白名单）。
+// 本地调试来源：localhost / 127.0.0.1 / [::1]，端口不限，方便前端本地联调
+function isLocalOrigin(value: string): boolean {
+  let host: string;
+  try {
+    host = new URL(value).hostname;
+  } catch {
+    return false;
+  }
+  return host === "localhost" || host === "127.0.0.1" || host === "[::1]";
+}
+
+// 白名单内的来源，或本地调试来源（不做端口限制）
+function isAllowedOrigin(origin: string, env: Env): boolean {
+  return allowedOrigins(env).includes(normalizeOrigin(origin)) || isLocalOrigin(origin);
+}
+
+// Referer 校验：有 Referer 时其来源必须在白名单内（含本地调试来源，与 CORS 共用同一判定）。
 // 无 Referer 一律放行：直接打开 URL、curl、以及 bgm-api 链路自检的 HEAD 取图都不带 Referer
 function refererAllowed(request: Request, env: Env): boolean {
   const referer = request.headers.get("Referer");
@@ -177,7 +193,7 @@ function refererAllowed(request: Request, env: Env): boolean {
   } catch {
     return false;
   }
-  return allowedOrigins(env).includes(normalizeOrigin(origin));
+  return isAllowedOrigin(origin, env);
 }
 
 function json(status: number, body: unknown, request: Request, env: Env): Response {

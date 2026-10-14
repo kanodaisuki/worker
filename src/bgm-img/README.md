@@ -46,8 +46,8 @@ curl https://bgm-img.kanochan.net/r/200/pic/cover/l/5b/e2/2785_5IaII.jpg
 
 ## 行为说明
 
-- **CORS**：浏览器端只能从白名单域名（`https://kanochan.net`、`https://kanochan.com`）跨域加载图片，白名单见下方配置；预检 `OPTIONS` 返回 204。
-- **防盗链**：`Referer` 来源不在白名单的热链请求返回 403（`{"error":"forbidden_referer"}`）；无 `Referer` 一律放行——直接打开 URL、`curl`、bgm-api 链路自检的 HEAD 取图都不带 `Referer`。对方把 `Referrer-Policy` 设为 `no-referrer` 或用非浏览器客户端可以绕过，此类拦截只挡常规盗链。
+- **CORS**：浏览器端只能从白名单域名（`https://kanochan.net`、`https://kanochan.com`）跨域加载图片，白名单见下方配置；`localhost` / `127.0.0.1` / `[::1]`（端口不限）的本地调试来源始终放行，方便网页本地联调；预检 `OPTIONS` 返回 204。
+- **防盗链**：`Referer` 来源不在白名单的热链请求返回 403（`{"error":"forbidden_referer"}`），`localhost` / `127.0.0.1` / `[::1]` 的本地调试来源同样放行；无 `Referer` 一律放行——直接打开 URL、`curl`、bgm-api 链路自检的 HEAD 取图都不带 `Referer`。对方把 `Referrer-Policy` 设为 `no-referrer` 或用非浏览器客户端可以绕过，此类拦截只挡常规盗链。
 - **缓存**：GET/HEAD 按 URL 缓存（HEAD 归入 GET 键），成功响应缓存 30 天并附 `Cache-Control: public, max-age=2592000`；响应头 `X-Cache: HIT/MISS` 表示是否命中边缘缓存。非 200 响应（404 等）透传且不写缓存。
 - **转发**：只透传条件请求头（`If-None-Match`、`If-Modified-Since`），固定 `Accept-Encoding: gzip` 保证缓存表示对所有客户端一致；Cookie 等其余请求头一律丢弃，避免泄漏与缓存旁路。仅支持 `GET`/`HEAD`，其余方法返回 405；上游异常返回 502。
 

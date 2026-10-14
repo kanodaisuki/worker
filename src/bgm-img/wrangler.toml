@@ -23,5 +23,6 @@ head_sampling_rate = 0.01
 enabled = true
 
 # CORS 与 Referer 防盗链白名单：逗号分隔，只允许这些来源跨域访问与热链（覆盖 worker.ts 中的默认值）
+# localhost / 127.0.0.1 / [::1]（端口不限）始终放行，便于网页本地调试
 [vars]
 CORS_ALLOWED_ORIGINS = "https://kanochan.net,https://kanochan.com"

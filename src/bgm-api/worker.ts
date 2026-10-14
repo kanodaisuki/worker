@@ -20,6 +20,7 @@ const USER_AGENT = "bgm-api-proxy/1.0 (https://github.com/kanodaisuki/worker)";
 
 // CORS 白名单：只允许这些来源跨域访问
 // 也可用 wrangler.toml 的 [vars].CORS_ALLOWED_ORIGINS 覆盖（逗号分隔，优先级更高）
+// localhost / 127.0.0.1 / [::1] 的本地调试来源（端口不限）始终放行，不受白名单与覆盖影响
 const DEFAULT_ALLOWED_ORIGINS = ["https://kanochan.net", "https://kanochan.com"];
 
 // 图片反向代理源站（如 https://bgm-img.kanochan.net），响应体里的图片地址会改写为该地址
@@ -426,10 +427,9 @@ function corsHeaders(request: Request, env: Env): Record<string, string> {
     Vary: "Origin",
   };
   const origin = request.headers.get("Origin");
-  // 只给白名单内的来源回显具体的 Origin，其余请求不带该头，由浏览器拦截
-  if (origin) {
-    const match = allowedOrigins(env).find((o) => o === normalizeOrigin(origin));
-    if (match) headers["Access-Control-Allow-Origin"] = match;
+  // 只给白名单内（或本地 localhost 调试来源）回显具体的 Origin，其余请求不带该头，由浏览器拦截
+  if (origin && isAllowedOrigin(origin, env)) {
+    headers["Access-Control-Allow-Origin"] = normalizeOrigin(origin);
   }
   return headers;
 }
@@ -462,6 +462,22 @@ function allowedOrigins(env: Env): string[] {
 
 function normalizeOrigin(value: string): string {
   return value.trim().replace(/\/+$/, "").toLowerCase();
+}
+
+// 本地调试来源：localhost / 127.0.0.1 / [::1]，端口不限，方便前端本地联调
+function isLocalOrigin(value: string): boolean {
+  let host: string;
+  try {
+    host = new URL(value).hostname;
+  } catch {
+    return false;
+  }
+  return host === "localhost" || host === "127.0.0.1" || host === "[::1]";
+}
+
+// 白名单内的来源，或本地调试来源（不做端口限制）
+function isAllowedOrigin(origin: string, env: Env): boolean {
+  return allowedOrigins(env).includes(normalizeOrigin(origin)) || isLocalOrigin(origin);
 }
 
 function json(status: number, body: unknown, request: Request, env: Env): Response {

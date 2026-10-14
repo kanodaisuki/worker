@@ -45,7 +45,7 @@ curl https://bgm-api.example.workers.dev/calendar
 
 ## 行为说明
 
-- **CORS**：浏览器端只能从白名单域名（`https://kanochan.net`、`https://kanochan.com`）跨域调用，白名单见下方配置；预检 `OPTIONS` 返回 204。
+- **CORS**：浏览器端只能从白名单域名（`https://kanochan.net`、`https://kanochan.com`）跨域调用，白名单见下方配置；`localhost` / `127.0.0.1` / `[::1]`（端口不限）的本地调试来源始终放行，方便网页本地联调；预检 `OPTIONS` 返回 204。
 - **图片地址改写**：JSON 成功响应中的图片地址（`lain.bgm.tv`，含 `http://`、`https://`、`//` 三种形式与 JSON 转义斜杠）统一改写为图片反向代理地址（默认 `https://bgm-img.kanochan.net`），并升级为 `https`；`bgm.tv` 是条目网页地址而非图片，保持不变。改写在写入缓存之前完成，缓存命中即改写后的正文。
 - **缓存**：GET 按 URL 缓存；搜索接口 `POST /v0/search/subjects` 按 URL + 请求体哈希缓存。响应头 `X-Cache: HIT/MISS` 表示是否命中边缘缓存；搜索结果缓存 5 分钟，条目/人物/角色详情（`/v0/(subjects|persons|characters)/<id>`）缓存 1 小时，成功响应附 `Cache-Control: public, max-age=...`。
 - **转发**：剔除逐跳与平台注入的请求头（`cf-ray`、`x-forwarded-for` 等），固定 `Accept-Encoding: gzip` 保证缓存表示对所有客户端一致；上游异常返回 502。改写路径下正文已解压并重新序列化，`Content-Encoding`/`Content-Length` 会被删除（平台自动重新压缩）；非 JSON、非 200 等其余响应按压缩流原样透传。

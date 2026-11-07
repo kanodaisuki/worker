@@ -1,0 +1,23 @@
+name = "random-img"
+main = "worker.ts"
+compatibility_date = "2026-10-12"
+
+# 预留：未来迁移到 Cloudflare 时绑定自定义域名（Custom Domain，Cloudflare 自动配置 DNS 与证书）。
+# 注意：routes 等顶层配置必须写在 [vars] 之前——TOML 中表头之后的键归入该表，
+# 写在 [vars] 之后会被解析成环境变量 vars.routes，而非路由配置。
+# routes = [{ pattern = "img.api.example.com", custom_domain = true }]
+
+# 可观测性：日志进 Workers Logs；异常/5xx 自动聚合为 Issues（在 Issues 面板查看）
+[observability]
+enabled = true
+
+[observability.logs]
+enabled = true
+head_sampling_rate = 1
+
+[observability.traces]
+enabled = true
+head_sampling_rate = 0.01
+
+[observability.issues]
+enabled = true

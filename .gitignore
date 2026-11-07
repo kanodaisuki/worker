@@ -5,6 +5,9 @@ node_modules/
 .wrangler/
 dist/
 
+# esa-cli dev 本地运行时产物
+src/random-img/esa/.dev/
+
 # 密钥与本地环境变量（切勿提交）
 .dev.vars
 .dev.vars.*

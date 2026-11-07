@@ -1,0 +1,8 @@
+{
+  "name": "random-img",
+  "description": "随机图片 API（refactor-php 迁移，随机 302 / 代理回源）",
+  "entry": "./entry.ts",
+  "dev": {
+    "port": 18080,
+  },
+}

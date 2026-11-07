@@ -13,10 +13,13 @@
     "deploy": "pnpm run deploy:bgm-api && pnpm run deploy:bgm-img && pnpm run deploy:transformations",
     "deploy:bgm-api": "wrangler deploy --config src/bgm-api/wrangler.toml",
     "deploy:bgm-img": "wrangler deploy --config src/bgm-img/wrangler.toml",
-    "deploy:transformations": "wrangler deploy --config src/transformations/wrangler.toml"
+    "deploy:transformations": "wrangler deploy --config src/transformations/wrangler.toml",
+    "deploy:random-img": "wrangler deploy --config src/random-img/wrangler.toml",
+    "deploy:random-img:esa": "cd src/random-img/esa && esa-cli deploy"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^5.20261012.1",
+    "esa-cli": "^1.0.13",
     "typescript": "^7.0.2",
     "vite-plus": "^1.1.0",
     "wrangler": "^4.149.0"

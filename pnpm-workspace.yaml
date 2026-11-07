@@ -1,4 +1,5 @@
 allowBuilds:
+  "@alicloud/openapi-core": true
   esbuild: true
   workerd: true
 minimumReleaseAgeExclude:
